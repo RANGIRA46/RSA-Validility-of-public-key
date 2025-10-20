@@ -1,0 +1,551 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <!--
+    RSA Public Key Validity Checker
+    - Single-file HTML/CSS/JS tool you can open in any modern browser.
+    - Paste a PEM RSA public key (either PKCS#1 "RSA PUBLIC KEY" or
+      SubjectPublicKeyInfo/PKCS#8 "PUBLIC KEY") or upload a .pem file.
+    - The script will try to import the key via Web Crypto (SPKI). If that
+      fails it will fall back to a tiny DER/ASN.1 parser for PKCS#1 keys
+      to extract modulus and exponent.
+    - It performs a set of heuristic validity checks (modulus size, exponent
+      sanity, tiny-prime divisibility checks) and gives recommendations.
+
+    Detailed comments are added throughout HTML, CSS and JavaScript so you
+    can learn how each part works and modify it.
+  -->
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>RSA Public Key Validity Checker</title>
+  <style>
+    /*
+      Simple, modern CSS. Every block below includes comments explaining the
+      layout choices so you can tweak appearance easily.
+    */
+    :root{
+      --bg:#0f1724; /* dark background */
+      --card:#0b1220; /* card background */
+      --muted:#94a3b8;  /* muted text color */
+      --accent:#60a5fa; /* accent color */
+      --success:#34d399;
+      --danger:#fb7185;
+      --glass: rgba(255,255,255,0.03);
+      --radius:12px;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+    }
+
+    html,body{height:100%;}
+    body{
+      margin:0;
+      background:linear-gradient(180deg,var(--bg),#071023);
+      color:#e6eef8;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      padding:24px;
+      box-sizing:border-box;
+    }
+
+    /* Center container with a column layout */
+    .container{
+      width:100%;
+      max-width:1000px;
+      border-radius:var(--radius);
+      background:linear-gradient(180deg,var(--card), rgba(11,18,32,0.92));
+      padding:20px;
+      box-shadow: 0 10px 30px rgba(2,6,23,0.6);
+      display:grid;
+      grid-template-columns: 1fr 420px; /* left = editor + results, right = details */
+      gap:18px;
+    }
+
+    /* Header area with small description */
+    header{
+      grid-column:1/-1;
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:12px;
+      margin-bottom:4px;
+    }
+    header h1{font-size:18px;margin:0;}
+    header p{margin:0;color:var(--muted);font-size:13px}
+
+    /* Left column: input area + results */
+    .left{display:flex;flex-direction:column;gap:12px}
+
+    /* Textarea where user pastes PEM */
+    textarea{
+      resize:vertical;
+      min-height:190px;
+      background:var(--glass);
+      color:inherit;
+      border:1px solid rgba(255,255,255,0.03);
+      padding:12px;
+      border-radius:10px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, "Roboto Mono", "Courier New", monospace;
+      font-size:13px;
+      line-height:1.45;
+    }
+
+    /* Controls row with buttons */
+    .controls{display:flex;gap:8px;align-items:center}
+    .controls input[type=file]{display:none}
+    .btn{
+      appearance:none;border:0;padding:8px 12px;border-radius:10px;background:linear-gradient(180deg,var(--accent),#3b82f6);color:#022047;font-weight:600;cursor:pointer;font-size:13px
+    }
+    .btn.secondary{background:transparent;border:1px solid rgba(255,255,255,0.04);color:var(--muted);font-weight:600}
+
+    /* Results box: green/red messages, plus extracted values */
+    .results{
+      background:rgba(255,255,255,0.02);
+      padding:12px;border-radius:10px;border:1px solid rgba(255,255,255,0.02);font-size:13px
+    }
+    .row{display:flex;justify-content:space-between;gap:10px}
+    .muted{color:var(--muted);font-size:13px}
+
+    /* Right column: explanation, raw output, copy buttons */
+    .right{display:flex;flex-direction:column;gap:12px}
+    pre{background:#021124;padding:12px;border-radius:8px;overflow:auto;font-size:13px}
+
+    .badge{display:inline-block;padding:6px 8px;border-radius:999px;background:rgba(255,255,255,0.03);font-weight:600}
+
+    /* Tiny responsive tweak */
+    @media (max-width:980px){
+      .container{grid-template-columns:1fr;}
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div>
+        <h1>RSA Public Key Validity Checker</h1>
+        <p>Paste a PEM public key ("-----BEGIN PUBLIC KEY-----" or "-----BEGIN RSA PUBLIC KEY-----") or upload a .pem file. The tool will inspect modulus and exponent and run basic sanity checks.</p>
+      </div>
+      <div style="text-align:right">
+        <span class="badge">Client-side only — privacy preserved</span>
+      </div>
+    </header>
+
+    <!-- LEFT: editor + action buttons + results -->
+    <section class="left">
+      <!-- Textarea for PEM input. Heavily commented for clarity. -->
+      <label for="pemInput" class="muted">PEM public key</label>
+      <textarea id="pemInput" placeholder="Paste PEM public key here (include header/footer)"></textarea>
+
+      <div class="controls">
+        <!-- file input to upload .pem; visually replaced by a button -->
+        <label class="btn secondary" title="Upload a PEM file">
+          Upload .pem
+          <input id="fileInput" type="file" accept=".pem,.crt,.cer,.der" />
+        </label>
+        <button class="btn" id="checkBtn">Check Key</button>
+        <button class="btn secondary" id="clearBtn">Clear</button>
+        <div style="flex:1"></div>
+        <button class="btn secondary" id="exampleBtn">Load Example</button>
+      </div>
+
+      <!-- Results block. We'll populate it dynamically -->
+      <div class="results" id="results">
+        <div class="muted">Results will appear here after you click <strong>Check Key</strong>.</div>
+      </div>
+    </section>
+
+    <!-- RIGHT: extracted details, raw JWK, recommendations -->
+    <aside class="right">
+      <div>
+        <h3 style="margin:0 0 8px 0">Extracted details</h3>
+        <div id="details" class="results muted">No details yet.</div>
+      </div>
+
+      <div>
+        <h3 style="margin:0 0 8px 0">Raw JWK / extracted values</h3>
+        <pre id="raw" style="min-height:140px">Nothing yet.</pre>
+        <div style="display:flex;gap:8px;margin-top:8px">
+          <button class="btn" id="copyJson">Copy JSON</button>
+          <button class="btn secondary" id="downloadJson">Download JSON</button>
+        </div>
+      </div>
+
+      <div>
+        <h3 style="margin:0 0 8px 0">What this tool checks</h3>
+        <div class="results muted" style="font-size:13px;">
+          <ul>
+            <li>PEM format and ability to import as SPKI (SubjectPublicKeyInfo).</li>
+            <li>Fallback parsing for PKCS#1 "RSA PUBLIC KEY" DER structure.</li>
+            <li>Extract modulus (n) & exponent (e) and compute modulus bit length.</li>
+            <li>Check exponent sanity (odd, >1) and typical safe exponents (e.g. 65537).</li>
+            <li>Trial-divide modulus by small primes to detect trivially weak keys.</li>
+            <li>Recommendations (e.g. use &ge; 2048-bit modulus; use e=65537).
+          </ul>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <script>
+    /*
+      JavaScript: detailed comments throughout.
+      The script is organized as follows:
+        1) Utility functions (base64, bigint conversion, DER reader)
+        2) Key parsing functions (try SPKI import, fallback PKCS#1 parse)
+        3) Heuristic checks (modulus size, exponent checks, small-prime factors)
+        4) UI wiring (buttons, file input, results display)
+
+      The code runs entirely in the browser. No network activity occurs.
+    */
+
+    // ---------- Utility helpers ----------
+
+    // base64 (standard) -> Uint8Array
+    function base64ToBytes(b64) {
+      // atob works with standard base64 (not base64url). We'll normalize.
+      const cleaned = b64.replace(/\s+/g, '');
+      const binary = atob(cleaned);
+      const len = binary.length;
+      const bytes = new Uint8Array(len);
+      for (let i = 0; i < len; i++) bytes[i] = binary.charCodeAt(i);
+      return bytes;
+    }
+
+    // base64url -> Uint8Array
+    function base64UrlToBytes(b64u) {
+      // Convert base64url to base64
+      let b64 = b64u.replace(/-/g, '+').replace(/_/g, '/');
+      // pad
+      while (b64.length % 4) b64 += '=';
+      return base64ToBytes(b64);
+    }
+
+    // Uint8Array -> BigInt (positive)
+    function bytesToBigInt(bytes) {
+      let bi = 0n;
+      for (let b of bytes) {
+        bi = (bi << 8n) + BigInt(b);
+      }
+      return bi;
+    }
+
+    // BigInt bit length
+    function bitLength(bigint) {
+      if (bigint === 0n) return 0;
+      let bits = 0;
+      let n = bigint;
+      while (n > 0n) { n >>= 1n; bits++; }
+      return bits;
+    }
+
+    // Convert ArrayBuffer/Uint8Array to base64 for display/encoding
+    function bytesToBase64(bytes) {
+      let binary = '';
+      for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+      return btoa(binary);
+    }
+
+    // Tiny DER parser helpers (for parsing PKCS#1 RSAPublicKey)
+    // We only implement enough to parse: SEQUENCE { INTEGER n, INTEGER e }
+    function readASN1Length(bytes, offset) {
+      // returns {length, lengthBytes}
+      const first = bytes[offset];
+      if ((first & 0x80) === 0) {
+        return { length: first & 0x7f, lengthBytes: 1 };
+      }
+      const numBytes = first & 0x7f;
+      let len = 0;
+      for (let i = 0; i < numBytes; i++) {
+        len = (len << 8) + bytes[offset + 1 + i];
+      }
+      return { length: len, lengthBytes: 1 + numBytes };
+    }
+
+    // Parse PKCS#1 RSAPublicKey DER (sequence of two integers)
+    function parsePKCS1RSAPublicKey(bytes) {
+      // minimal safety checks
+      if (bytes[0] !== 0x30) throw new Error('Not a DER SEQUENCE (expected 0x30)');
+      let pos = 1;
+      const l1 = readASN1Length(bytes, pos);
+      pos += l1.lengthBytes;
+      // now expect INTEGER (modulus)
+      if (bytes[pos] !== 0x02) throw new Error('Expected INTEGER (modulus)');
+      pos++;
+      const lenModInfo = readASN1Length(bytes, pos);
+      pos += lenModInfo.lengthBytes;
+      const modLen = lenModInfo.length;
+      const modulus = bytes.slice(pos, pos + modLen);
+      pos += modLen;
+      // next should be exponent INTEGER
+      if (bytes[pos] !== 0x02) throw new Error('Expected INTEGER (exponent)');
+      pos++;
+      const lenExpInfo = readASN1Length(bytes, pos);
+      pos += lenExpInfo.lengthBytes;
+      const expLen = lenExpInfo.length;
+      const exponent = bytes.slice(pos, pos + expLen);
+      return { modulus, exponent };
+    }
+
+    // Remove PEM armor and return raw bytes. Accepts both PEM with headers and raw base64
+    function pemToBytes(pem) {
+      // detect and remove header/footer lines if present
+      const headerRegex = /-----BEGIN ([A-Z ]+)-----/;
+      const footerRegex = /-----END ([A-Z ]+)-----/;
+      // If begins with '-----', treat as PEM and strip header/footer
+      if (pem.match(/-----BEGIN/)) {
+        // collect the base64 body
+        const lines = pem.split(/\r?\n/).filter(l => !l.startsWith('-----'));
+        const b64 = lines.join('');
+        return base64ToBytes(b64);
+      }
+      // Otherwise assume it's raw base64
+      return base64ToBytes(pem.trim());
+    }
+
+    // Try to import bytes as SPKI using Web Crypto. We try a few RSA algorithms to be lenient.
+    async function tryImportSpki(spkiBytes) {
+      const algos = [
+        { name: 'RSA-OAEP', hash: 'SHA-256' },
+        { name: 'RSA-OAEP', hash: 'SHA-1' },
+        { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+        { name: 'RSA-PSS', hash: 'SHA-256' },
+      ];
+      for (let alg of algos) {
+        try {
+          // attempt import as public key (SPKI)
+          const key = await crypto.subtle.importKey(
+            'spki',
+            spkiBytes.buffer || spkiBytes,
+            alg,
+            true,
+            [] // no usages needed for read/export
+          );
+          return { key, alg };
+        } catch (e) {
+          // silent continue; we'll try next algorithm
+        }
+      }
+      // If none worked, throw
+      throw new Error('Web Crypto SPKI import failed for all tried algorithms');
+    }
+
+    // Export a subtleCrypto key to a JWK with modulus n and exponent e
+    async function exportKeyToJwk(key) {
+      const jwk = await crypto.subtle.exportKey('jwk', key);
+      return jwk;
+    }
+
+    // trial-divide a BigInt by small primes up to 'limit' to find tiny prime factors.
+    // returns an array of small divisors found (may be empty).
+    function findSmallPrimeDivisors(n, limit = 10000) {
+      // simple sieve to generate primes up to limit
+      const isPrime = new Uint8Array(limit + 1);
+      isPrime.fill(1);
+      isPrime[0] = isPrime[1] = 0;
+      for (let p = 2; p * p <= limit; p++) if (isPrime[p]) for (let q = p * p; q <= limit; q += p) isPrime[q] = 0;
+      const divisors = [];
+      for (let p = 2; p <= limit; p++) {
+        if (!isPrime[p]) continue;
+        if (n % BigInt(p) === 0n) divisors.push(p);
+      }
+      return divisors;
+    }
+
+    // ---------- Main checker logic ----------
+
+    async function analyzePem(pemText) {
+      // Attempt to decode PEM to bytes
+      let bytes;
+      try { bytes = pemToBytes(pemText); }
+      catch (e) { throw new Error('Failed to decode PEM/base64: ' + e.message); }
+
+      // First, attempt import as SPKI (SubjectPublicKeyInfo)
+      try {
+        const {key, alg} = await tryImportSpki(bytes);
+        // Export to JWK to access n and e (base64url)
+        const jwk = await exportKeyToJwk(key);
+        if (!jwk.n || !jwk.e) throw new Error('Imported key missing n/e in JWK');
+        const nBytes = base64UrlToBytes(jwk.n);
+        const eBytes = base64UrlToBytes(jwk.e);
+        const n = bytesToBigInt(nBytes);
+        const e = bytesToBigInt(eBytes);
+        return { source: 'SPKI', jwk, n, e, nBytes, eBytes, alg };
+      } catch (spkiErr) {
+        // If SPKI import fails, fall back to PKCS#1 parser
+        try {
+          const parsed = parsePKCS1RSAPublicKey(bytes);
+          const nBytes = parsed.modulus;
+          const eBytes = parsed.exponent;
+          const n = bytesToBigInt(nBytes);
+          const e = bytesToBigInt(eBytes);
+          // Build a pseudo-JWK for display
+          const jwk = {
+            kty: 'RSA',
+            n: (function(){ let b = btoa(String.fromCharCode(...nBytes)); return b.replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');})(),
+            e: (function(){ let b = btoa(String.fromCharCode(...eBytes)); return b.replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');})(),
+          };
+          return { source: 'PKCS1', jwk, n, e, nBytes, eBytes };
+        } catch (pkcsErr) {
+          // Both methods failed; surface combined error messages
+          throw new Error('Failed to parse key as SPKI and failed PKCS#1 parse.\nSPKI error: ' + spkiErr.message + '\nPKCS#1 error: ' + pkcsErr.message);
+        }
+      }
+    }
+
+    // Run a set of heuristic checks and produce human-readable messages and severities
+    function runChecks(n, e, nBytes) {
+      const messages = [];
+      const bits = bitLength(n);
+      // 1) modulus size
+      if (bits < 1024) messages.push({level:'danger', text:`Modulus is only ${bits} bits — insecure. Use at least 2048 bits.`});
+      else if (bits < 2048) messages.push({level:'warn', text:`Modulus is ${bits} bits — considered weak today. Prefer 2048+ bits.`});
+      else if (bits > 16384) messages.push({level:'warn', text:`Modulus is ${bits} bits — unusually large; may be unsupported by some libraries.`});
+      else messages.push({level:'ok', text:`Modulus length: ${bits} bits.`});
+
+      // 2) exponent sanity checks
+      if (e <= 1n) messages.push({level:'danger', text:`Public exponent e = ${e} is invalid (<=1).`});
+      else if (e % 2n === 0n) messages.push({level:'danger', text:`Public exponent e = ${e} is even — invalid (e must be odd).`});
+      else {
+        // recommend common exponent values
+        const eNum = Number(e <= Number.MAX_SAFE_INTEGER ? e : 0n);
+        if (e === 65537n) messages.push({level:'ok', text:`Public exponent e = 65537 (recommended common value).`});
+        else if (e === 3n) messages.push({level:'warn', text:`Public exponent e = 3 (small) — historically fast but has security pitfalls if used with poor padding.`});
+        else if (eNum && eNum < 65537) messages.push({level:'warn', text:`Public exponent e = ${e} (smaller than 65537). Evaluate whether this was intentional.`});
+        else messages.push({level:'ok', text:`Public exponent e = ${e}.`});
+      }
+
+      // 3) tiny prime divisor checks (catch trivially weak keys like n divisible by 2,3,5...)
+      const smallDivs = findSmallPrimeDivisors(n, 10000);
+      if (smallDivs.length > 0) messages.push({level:'danger', text:`Modulus has small prime divisors: ${smallDivs.join(', ')} — key is trivially weak.`});
+      else messages.push({level:'ok', text:`No prime factor <= 10000 divides the modulus (good quick check).`});
+
+      // 4) leading zero check in raw bytes (DER INTEGER may contain leading zero to mark positive) — show if present
+      if (nBytes[0] === 0x00) messages.push({level:'info', text:'Modulus has a leading zero byte in DER representation (normal for positive integers to avoid sign bit).'});
+
+      return {messages, bits};
+    }
+
+    // ---------- UI wiring ----------
+
+    const pemInput = document.getElementById('pemInput');
+    const fileInput = document.getElementById('fileInput');
+    const checkBtn = document.getElementById('checkBtn');
+    const clearBtn = document.getElementById('clearBtn');
+    const exampleBtn = document.getElementById('exampleBtn');
+    const resultsEl = document.getElementById('results');
+    const detailsEl = document.getElementById('details');
+    const rawEl = document.getElementById('raw');
+    const copyJsonBtn = document.getElementById('copyJson');
+    const downloadJsonBtn = document.getElementById('downloadJson');
+
+    // Example small RSA public key (2048-bit) PEM for testing. This is a sample generated key
+    // (not secret) — included so users can test the UI quickly.
+    const examplePem = `-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAw87h0n0fJr1r1s1pH5lJ\nrQjx0xVfPLt6p1V6Q6k5G3cQY4o7/CkdGzK3G6yW1q8g6r/1p1k2jvGZ1v8zP5bI\nFw1bWmKr1h7xngk2w0p6Yh8sQb6s2q9a9G6H1Z5PpGZy1A9wG17YqXx8kDqJg2NI\nN1Yy6v1v6s7qk1mVhG9o5PqZ4U6pG5s5I0sZy9eKc2jQIDAQAB\n-----END PUBLIC KEY-----`;
+
+    exampleBtn.addEventListener('click', () => { pemInput.value = examplePem; });
+
+    // File upload: read file as text and set into textarea
+    fileInput.addEventListener('change', async (ev) => {
+      const f = ev.target.files[0];
+      if (!f) return;
+      const txt = await f.text();
+      pemInput.value = txt;
+    });
+
+    // Clear button
+    clearBtn.addEventListener('click', () => {
+      pemInput.value = '';
+      resultsEl.innerHTML = '<div class="muted">Results will appear here after you click <strong>Check Key</strong>.</div>';
+      detailsEl.textContent = 'No details yet.';
+      rawEl.textContent = 'Nothing yet.';
+    });
+
+    // Copy JSON button
+    copyJsonBtn.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(rawEl.textContent);
+        alert('Copied JSON to clipboard');
+      } catch (e) { alert('Copy failed: ' + e.message); }
+    });
+
+    // Download JSON
+    downloadJsonBtn.addEventListener('click', () => {
+      const data = rawEl.textContent;
+      const blob = new Blob([data], {type:'application/json'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'rsa-key-info.json';
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+    });
+
+    // Main check handler
+    checkBtn.addEventListener('click', async () => {
+      const pem = pemInput.value.trim();
+      if (!pem) { alert('Please paste a PEM public key first.'); return; }
+      resultsEl.innerHTML = '<div class="muted">Analyzing key (this runs locally in your browser)...</div>';
+      detailsEl.textContent = 'Parsing...';
+      rawEl.textContent = 'Working...';
+
+      try {
+        const info = await analyzePem(pem);
+        const {n,e,nBytes,jwk,source,alg} = info;
+        const checks = runChecks(n,e,nBytes);
+
+        // Build results HTML with color-coded messages
+        const sections = [];
+        sections.push(`<div class=\"row\"><div><strong>Source</strong></div><div class=\"muted\">${source}${alg?(' — imported with '+alg.name):''}</div></div>`);
+        sections.push(`<div class=\"row\"><div><strong>Modulus bits</strong></div><div class=\"muted\">${checks.bits} bits</div></div>`);
+        sections.push(`<div class=\"row\"><div><strong>Public exponent</strong></div><div class=\"muted\">${e.toString()}</div></div>`);
+
+        // messages
+        for (const m of checks.messages) {
+          let color = '#e6eef8';
+          if (m.level === 'danger') color = 'var(--danger)';
+          else if (m.level === 'warn') color = '#fbbf24';
+          else if (m.level === 'ok') color = 'var(--success)';
+          else color = 'var(--muted)';
+          sections.push(`<div style=\"margin-top:8px;padding:8px;border-radius:8px;background:rgba(255,255,255,0.01);border:1px solid rgba(255,255,255,0.02)\"><div style=\"color:${color};font-weight:700\">${m.text}</div></div>`);
+        }
+
+        // Show near-term recommendations
+        const recs = [];
+        if (checks.bits < 2048) recs.push('Use at least a 2048-bit modulus for general security.');
+        if (e !== 65537n) recs.push('Consider using well-known exponent 65537 unless you have a specific reason not to.');
+        if (checks.messages.some(x => x.text.includes('small prime'))) recs.push('Key has tiny prime factors — regenerate key immediately.');
+        if (recs.length > 0) sections.push(`<div style=\"margin-top:10px;padding:10px;border-radius:8px;background:rgba(255,255,255,0.01)\"><strong>Recommendations</strong><ul>${recs.map(r=>'<li>'+r+'</li>').join('')}</ul></div>`);
+
+        resultsEl.innerHTML = sections.join('\n');
+
+        // details column: show human-readable details
+        detailsEl.innerHTML = `<div><strong>Modulus (hex, first 120 chars)</strong><div class=\"muted\">${bytesToHex(nBytes).slice(0,120)}${bytesToHex(nBytes).length>120?'...':''}</div></div><div style=\"margin-top:8px\"><strong>Exponent (decimal)</strong><div class=\"muted\">${e.toString()}</div></div>`;
+
+        // Show raw JWK-like object for user to copy or download
+        const out = {
+          source, algorithm: alg?alg.name:null, jwk,
+          modulus_bits: checks.bits,
+          e_decimal: e.toString()
+        };
+        rawEl.textContent = JSON.stringify(out, null, 2);
+
+      } catch (err) {
+        resultsEl.innerHTML = `<div style=\"color:var(--danger);font-weight:700\">Error: ${escapeHtml(err.message)}</div>`;
+        detailsEl.textContent = 'Parsing failed.';
+        rawEl.textContent = '';
+      }
+    });
+
+    // small helper: hex display
+    function bytesToHex(bytes){
+      return Array.from(bytes).map(b => b.toString(16).padStart(2,'0')).join('');
+    }
+
+    // very small escape helper for error text
+    function escapeHtml(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+    // Optional: when user presses Ctrl+Enter in textarea, run check
+    pemInput.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) { checkBtn.click(); } });
+
+    // End of script
+  </script>
+</body>
+</html>
